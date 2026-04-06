@@ -5,4 +5,8 @@ plotly>=5.20.0
 scipy>=1.12.0
 pandas>=2.0.0
 numpy>=1.26.0
+<<<<<<< HEAD
 statsmodels>=0.14.0
+=======
+statsmodels>=0.14.0
+>>>>>>> 23d1031b0309c0a86503baba8f5b24c0bef6a884
