@@ -6,7 +6,8 @@ from streamlit_folium import st_folium
 import plotly.express as px
 import plotly.graph_objects as go
 from scipy import stats
-import os, sys
+import os, sys, json
+import branca.colormap as cm
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -188,7 +189,28 @@ def load_data():
         subprocess.run([sys.executable, os.path.join(os.path.dirname(__file__), "data_generator.py")])
     return pd.read_csv(csv)
 
+@st.cache_data
+def load_geojson():
+    geo_path = os.path.join(os.path.dirname(__file__), "mexico_states.geojson")
+    with open(geo_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
 df_full = load_data()
+geo_states = load_geojson()
+
+# Mapping: app state name → GeoJSON state_name
+STATE_NAME_MAP = {
+    "CDMX": "Distrito Federal",
+    "Coahuila": "Coahuila de Zaragoza",
+    "Michoacán": "Michoacán de Ocampo",
+    "Veracruz": "Veracruz de Ignacio de la Llave",
+}
+# Reverse mapping: GeoJSON name → app name
+GEO_TO_APP = {v: k for k, v in STATE_NAME_MAP.items()}
+for feat in geo_states["features"]:
+    geo_name = feat["properties"]["state_name"]
+    if geo_name not in GEO_TO_APP:
+        GEO_TO_APP[geo_name] = geo_name
 
 # ─── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
@@ -305,6 +327,105 @@ with col_map:
             width="100%",
         )
 
+        # ── Capa Coropleta de Estados ──────────────────────────────────
+        # Aggregate poverty by state for the full dataset (not filtered)
+        estado_agg = df_full.groupby("estado").agg(
+            pobreza_media=("pobreza_multidim", "mean"),
+            rezago_medio=("rezago_educativo", "mean"),
+            poblacion_total=("poblacion", "sum"),
+            municipios_count=("mun_id", "count"),
+        ).reset_index()
+
+        # Map app state names to GeoJSON names
+        estado_agg["geo_name"] = estado_agg["estado"].map(
+            lambda x: STATE_NAME_MAP.get(x, x)
+        )
+
+        # Build a dict: geo_name -> data
+        state_data = {}
+        for _, r in estado_agg.iterrows():
+            state_data[r["geo_name"]] = {
+                "pobreza": r["pobreza_media"],
+                "rezago": r["rezago_medio"],
+                "poblacion": r["poblacion_total"],
+                "municipios": r["municipios_count"],
+                "app_name": r["estado"],
+            }
+
+        # Color scale for poverty
+        colormap = cm.LinearColormap(
+            colors=["#1a9641", "#a6d96a", "#ffffbf", "#fdae61", "#d7191c"],
+            vmin=0, vmax=80,
+            caption="Pobreza Multidimensional (%)",
+        )
+
+        def style_function(feature):
+            geo_name = feature["properties"]["state_name"]
+            data = state_data.get(geo_name)
+            if data:
+                color = colormap(data["pobreza"])
+                return {
+                    "fillColor": color,
+                    "color": "#e6edf3",
+                    "weight": 1.2,
+                    "dashArray": "",
+                    "fillOpacity": 0.55,
+                }
+            else:
+                return {
+                    "fillColor": "#21262d",
+                    "color": "#484f58",
+                    "weight": 0.8,
+                    "dashArray": "4",
+                    "fillOpacity": 0.25,
+                }
+
+        def highlight_function(feature):
+            return {
+                "weight": 3,
+                "color": "#58a6ff",
+                "fillOpacity": 0.75,
+            }
+
+        # Create tooltip for each state
+        geo_layer = folium.GeoJson(
+            geo_states,
+            name="Estados",
+            style_function=style_function,
+            highlight_function=highlight_function,
+            tooltip=folium.GeoJsonTooltip(
+                fields=["state_name"],
+                aliases=["Estado:"],
+                style="""
+                    background-color: #161b22;
+                    color: #e6edf3;
+                    font-family: 'DM Sans', sans-serif;
+                    font-size: 12px;
+                    border: 1px solid #21262d;
+                    border-radius: 6px;
+                    padding: 8px;
+                """,
+            ),
+        )
+
+        # Add custom popup with state data
+        for feature in geo_layer.data["features"]:
+            geo_name = feature["properties"]["state_name"]
+            data = state_data.get(geo_name)
+            app_name = GEO_TO_APP.get(geo_name, geo_name)
+            if data:
+                feature["properties"]["state_name"] = (
+                    f"{app_name} · Pobreza: {data['pobreza']:.1f}% · "
+                    f"Rezago: {data['rezago']:.1f}% · "
+                    f"Pob: {data['poblacion']:,.0f}"
+                )
+            else:
+                feature["properties"]["state_name"] = f"{app_name} · Sin datos"
+
+        geo_layer.add_to(m)
+        colormap.add_to(m)
+
+        # ── Marcadores de municipios sobre los estados ────────────────
         for _, row in df.iterrows():
             # ── Capa Pobreza ──
             if capa_pobreza:
@@ -389,7 +510,9 @@ with col_map:
                     ),
                 ).add_to(m)
 
-        st_folium(m, height=480, use_container_width=True, returned_objects=[])
+        # Layer control
+        folium.LayerControl().add_to(m)
+        st_folium(m, height=520, use_container_width=True, returned_objects=[])
 
 # ── ANÁLISIS ──────────────────────────────────────────────────────────────────
 with col_analysis:
